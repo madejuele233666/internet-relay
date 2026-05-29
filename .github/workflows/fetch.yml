@@ -3,19 +3,19 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'URL to fetch'
+        description: URL to fetch
         required: true
         type: string
       method:
-        description: 'HTTP method'
-        default: 'GET'
+        description: HTTP method
+        default: GET
         type: string
       id:
-        description: 'Request ID'
+        description: Request ID
         default: '0'
         type: string
       data:
-        description: 'Request body'
+        description: Request body
         default: ''
         type: string
 
@@ -23,79 +23,18 @@ jobs:
   fetch:
     runs-on: ubuntu-latest
     steps:
-      - name: Execute Request
-        env:
-          URL: ${{ github.event.inputs.url }}
-          METHOD: ${{ github.event.inputs.method }}
-          REQ_ID: ${{ github.event.inputs.id }}
-          DATA: ${{ github.event.inputs.data }}
-        run: |
-          echo "{\"id\":\"$REQ_ID\",\"url\":\"$URL\",\"method\":\"$METHOD\"}" > /tmp/metadata.json
-
-          # Save request body if provided
-          if [ -n "$DATA" ]; then
-            printf '%s' "$DATA" > /tmp/request_body.txt
-          fi
-
-          # Execute curl with appropriate method
+      - run: |
           curl -sL --connect-timeout 30 --max-time 60 \
-            -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' \
-            -D /tmp/response_headers.txt \
-            -o /tmp/response_body.bin \
-            -w '%{http_code}|%{size_download}|%{time_total}' \
-            -X "$METHOD" \
-            ${DATA:+-d @/tmp/request_body.txt} \
-            "$URL" > /tmp/curl_stats.txt 2>/tmp/curl_error.txt
-
-          echo "Exit: $?" >> /tmp/curl_error.txt
-
-      - name: Package Results
-        env:
-          REQ_ID: ${{ github.event.inputs.id }}
-        run: |
-          # Read results
-          STATUS=$(head -1 /tmp/curl_stats.txt 2>/dev/null | cut -d'|' -f1)
-          SIZE=$(head -1 /tmp/curl_stats.txt 2>/dev/null | cut -d'|' -f2)
-          TIME=$(head -1 /tmp/curl_stats.txt 2>/dev/null | cut -d'|' -f3)
-          BODY_B64=$(base64 -w0 < /tmp/response_body.bin 2>/dev/null || echo "")
-
-          export STATUS SIZE TIME BODY_B64
-
-          python3 << 'PYEOF'
-import json, os
-headers = {}
-try:
-    with open('/tmp/response_headers.txt') as f:
-        for line in f:
-            line = line.strip()
-            if ':' in line:
-                k, v = line.split(':', 1)
-                if k.lower() not in ('transfer-encoding',):
-                    headers[k.strip()] = v.strip()
-except:
-    pass
-
-result = {
-    'id': os.environ.get('REQ_ID', '0'),
-    'status': 'success',
-    'http_status': int(os.environ.get('STATUS', '0') or '0'),
-    'headers': headers,
-    'body': os.environ.get('BODY_B64', ''),
-    'body_size': int(os.environ.get('SIZE', '0') or '0'),
-    'time_total': float(os.environ.get('TIME', '0') or '0'),
-}
-with open('/tmp/result.json', 'w') as f:
-    json.dump(result, f)
-print(f'Complete: HTTP {result["http_status"]}, {result["body_size"]} bytes, {result["time_total"]}s')
-PYEOF
-
-      - name: Upload Result
-        uses: actions/upload-artifact@v4
+            -A "Mozilla/5.0" \
+            -X ${{ github.event.inputs.method }} \
+            -o /tmp/resp.bin \
+            -w "%{http_code}" \
+            "${{ github.event.inputs.url }}" > /tmp/status.txt
+      - run: |
+          BODY=$(base64 -w0 < /tmp/resp.bin)
+          STATUS=$(cat /tmp/status.txt)
+          echo '{"id":"${{ github.event.inputs.id }}","status":"success","http_status":'$STATUS',"body":"'$BODY'","body_size":'$(wc -c < /tmp/resp.bin)'}' > /tmp/result.json
+      - uses: actions/upload-artifact@v4
         with:
           name: result-${{ github.event.inputs.id }}
-          path: |
-            /tmp/result.json
-            /tmp/metadata.json
-            /tmp/response_body.bin
-            /tmp/curl_error.txt
-            /tmp/response_headers.txt
+          path: /tmp/result.json
