@@ -1,0 +1,89 @@
+name: Continuous Relay
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */5 * * *'
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          cat > /tmp/relay.py << 'PYEOF'
+import os, json, time, base64, subprocess, urllib.request, urllib.error, glob
+
+REQUESTS_DIR = 'requests'
+RESPONSES_DIR = 'responses'
+
+os.makedirs(REQUESTS_DIR, exist_ok=True)
+os.makedirs(RESPONSES_DIR, exist_ok=True)
+
+def process(req_file):
+    try:
+        with open(req_file) as f:
+            req = json.loads(f.read())
+    except Exception as e:
+        print(f"Error reading {req_file}: {e}", flush=True)
+        return
+
+    rid = req.get('id', 'unknown')
+    url = req.get('url')
+    method = req.get('method', 'GET').upper()
+    headers = req.get('headers', {})
+    body = req.get('body', '')
+    timeout = req.get('timeout', 30)
+
+    print(f"Processing {rid}: {method} {url}", flush=True)
+
+    try:
+        data = body.encode() if body and method in ('POST','PUT','PATCH') else None
+        r = urllib.request.Request(url, data=data, headers=headers, method=method)
+        resp = urllib.request.urlopen(r, timeout=timeout)
+        resp_body = resp.read()
+        result = {
+            'id': rid, 'status': 'success',
+            'http_status': resp.status,
+            'headers': dict(resp.getheaders()),
+            'body': base64.b64encode(resp_body).decode(),
+            'body_size': len(resp_body)
+        }
+    except urllib.error.HTTPError as e:
+        err_body = e.read() if hasattr(e, 'read') else b''
+        result = {'id': rid, 'status': 'error', 'http_status': e.code,
+                  'body': base64.b64encode(err_body).decode() if err_body else '',
+                  'headers': dict(e.headers.items()) if e.headers else {}}
+    except Exception as e:
+        result = {'id': rid, 'status': 'error', 'error': str(e)}
+
+    resp_file = os.path.join(RESPONSES_DIR, f'{rid}.json')
+    with open(resp_file, 'w') as f:
+        json.dump(result, f)
+
+    os.remove(req_file)
+    print(f"Completed {rid}: {result.get('http_status', 'error')}", flush=True)
+
+print("Continuous relay started", flush=True)
+idle = 0
+while True:
+    reqs = sorted(glob.glob(os.path.join(REQUESTS_DIR, '*.json')))
+    if reqs:
+        idle = 0
+        for req_file in reqs:
+            process(req_file)
+        subprocess.run(['git', 'add', RESPONSES_DIR, REQUESTS_DIR], capture_output=True)
+        r = subprocess.run(['git', 'diff', '--cached', '--quiet'], capture_output=True)
+        if r.returncode != 0:
+            subprocess.run(['git', 'commit', '-m', f'relay: processed {len(reqs)} request(s)'], capture_output=True)
+            subprocess.run(['git', 'push'], capture_output=True)
+            print(f"Pushed {len(reqs)} response(s)", flush=True)
+    else:
+        idle += 1
+        if idle >= 30:
+            subprocess.run(['git', 'fetch', 'origin'], capture_output=True)
+            subprocess.run(['git', 'merge', '--ff-only', 'origin/master'], capture_output=True)
+            idle = 0
+    time.sleep(2)
+PYEOF
+          python3 /tmp/relay.py

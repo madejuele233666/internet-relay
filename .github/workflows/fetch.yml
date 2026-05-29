@@ -1,4 +1,4 @@
-name: Internet Relay
+name: Fetch Enhanced
 on:
   workflow_dispatch:
     inputs:
@@ -7,37 +7,113 @@ on:
         required: true
         type: string
       method:
-        description: 'HTTP method (GET/POST)'
+        description: 'HTTP method'
         default: 'GET'
         type: string
+      id:
+        description: 'Request ID for matching responses'
+        default: '0'
+        type: string
       data:
-        description: 'Request body (for POST)'
+        description: 'Request body (for POST/PUT/PATCH)'
         default: ''
+        type: string
+      headers:
+        description: 'Extra headers as JSON ({"key":"val"})'
+        default: '{}'
         type: string
 
 jobs:
   fetch:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch URL
+      - name: Execute Request
+        env:
+          URL: ${{ github.event.inputs.url }}
+          METHOD: ${{ github.event.inputs.method }}
+          REQ_ID: ${{ github.event.inputs.id }}
+          DATA: ${{ github.event.inputs.data }}
+          HEADERS: ${{ github.event.inputs.headers }}
         run: |
-          echo "Fetching: ${{ github.event.inputs.url }}"
-          if [ "${{ github.event.inputs.method }}" = "POST" ]; then
-            curl -sL --connect-timeout 30 --max-time 60 \
-              -X POST -d "${{ github.event.inputs.data }}" \
-              -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-              "${{ github.event.inputs.url }}" > /tmp/response.txt 2>/tmp/error.txt
-          else
-            curl -sL --connect-timeout 30 --max-time 60 \
-              -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-              "${{ github.event.inputs.url }}" > /tmp/response.txt 2>/tmp/error.txt
+          echo "{\"id\":\"$REQ_ID\",\"url\":\"$URL\",\"method\":\"$METHOD\"}" > /tmp/metadata.json
+
+          CURL_CMD="curl -sL --connect-timeout 30 --max-time 60 \
+            -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' \
+            -D /tmp/response_headers.txt \
+            -o /tmp/response_body.bin \
+            -w '{\"http_code\":%{http_code},\"size\":%{size_download},\"time_total\":%{time_total}}'"
+
+          # Add extra headers
+          echo "$HEADERS" | python3 -c "
+import json,sys
+try:
+    h = json.loads(sys.stdin.read())
+    for k,v in h.items():
+        print(f'-H \"{k}: {v}\"')
+except: pass
+" 2>/dev/null | while read hdr; do
+            CURL_CMD="$CURL_CMD $hdr"
+          done
+
+          if [ "$METHOD" = "POST" ] || [ "$METHOD" = "PUT" ] || [ "$METHOD" = "PATCH" ]; then
+            if [ -n "$DATA" ]; then
+              echo "$DATA" > /tmp/request_body.txt
+              CURL_CMD="$CURL_CMD -X $METHOD --data-binary @/tmp/request_body.txt"
+            else
+              CURL_CMD="$CURL_CMD -X $METHOD"
+            fi
+          elif [ "$METHOD" != "GET" ]; then
+            CURL_CMD="$CURL_CMD -X $METHOD"
           fi
-          echo "Exit: $?" >> /tmp/response.txt
-          
-      - name: Upload artifact
+
+          eval "$CURL_CMD" > /tmp/curl_stats.json 2>/tmp/curl_error.txt
+          echo "Exit code: $?" >> /tmp/curl_error.txt
+
+      - name: Process Results
+        run: |
+          # Read headers
+          cat /tmp/response_headers.txt 2>/dev/null | head -50
+
+          # Encode body as base64
+          BODY_B64=$(base64 -w0 < /tmp/response_body.bin 2>/dev/null || echo "")
+          STATUS=$(python3 -c "import json; d=json.load(open('/tmp/curl_stats.json')); print(d.get('http_code',0))" 2>/dev/null || echo "0")
+          SIZE=$(python3 -c "import json; d=json.load(open('/tmp/curl_stats.json')); print(d.get('size',0))" 2>/dev/null || echo "0")
+          TIME=$(python3 -c "import json; d=json.load(open('/tmp/curl_stats.json')); print('%.2f' % d.get('time_total',0))" 2>/dev/null || echo "0")
+
+          # Parse response headers
+          python3 -c "
+import json
+headers = {}
+try:
+    with open('/tmp/response_headers.txt') as f:
+        for line in f:
+            line = line.strip()
+            if ':' in line:
+                k, v = line.split(':', 1)
+                if k.lower() not in ('transfer-encoding',):
+                    headers[k.strip()] = v.strip()
+except: pass
+result = {
+    'id': '${{ github.event.inputs.id }}',
+    'status': 'success',
+    'http_status': int('$STATUS'),
+    'headers': headers,
+    'body': '$BODY_B64',
+    'body_size': int('$SIZE'),
+    'time_total': float('$TIME')
+}
+with open('/tmp/result.json', 'w') as f:
+    json.dump(result, f)
+print(f'Complete: {result[\"http_status\"]} ({result[\"body_size\"]} bytes in {result[\"time_total\"]}s)')
+"
+
+      - name: Upload Result
         uses: actions/upload-artifact@v4
         with:
-          name: response-${{ github.run_id }}
+          name: result-${{ github.event.inputs.id }}
           path: |
-            /tmp/response.txt
-            /tmp/error.txt
+            /tmp/result.json
+            /tmp/metadata.json
+            /tmp/response_body.bin
+            /tmp/curl_error.txt
+            /tmp/response_headers.txt
