@@ -7,11 +7,11 @@ on:
         required: true
         type: string
       method:
-        description: 'HTTP method'
+        description: 'HTTP method (GET/POST)'
         default: 'GET'
         type: string
-      post_data:
-        description: 'POST data (if POST method)'
+      data:
+        description: 'Request body (for POST)'
         default: ''
         type: string
 
@@ -20,21 +20,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Fetch URL
-        id: fetch
         run: |
-          echo "fetching ${{ github.event.inputs.url }}"
+          echo "Fetching: ${{ github.event.inputs.url }}"
           if [ "${{ github.event.inputs.method }}" = "POST" ]; then
-            curl -sL --connect-timeout 30 -X POST \
-              -d "${{ github.event.inputs.post_data }}" \
-              "${{ github.event.inputs.url }}" > /tmp/response.txt 2>&1
+            curl -sL --connect-timeout 30 --max-time 60 \
+              -X POST -d "${{ github.event.inputs.data }}" \
+              -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+              "${{ github.event.inputs.url }}" > /tmp/response.txt 2>/tmp/error.txt
           else
-            curl -sL --connect-timeout 30 \
-              "${{ github.event.inputs.url }}" > /tmp/response.txt 2>&1
+            curl -sL --connect-timeout 30 --max-time 60 \
+              -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+              "${{ github.event.inputs.url }}" > /tmp/response.txt 2>/tmp/error.txt
           fi
-          echo "status=$?" >> $GITHUB_OUTPUT
-      
-      - name: Upload result
+          echo "Exit: $?" >> /tmp/response.txt
+          
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: response
-          path: /tmp/response.txt
+          name: response-${{ github.run_id }}
+          path: |
+            /tmp/response.txt
+            /tmp/error.txt
