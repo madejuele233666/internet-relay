@@ -1,0 +1,40 @@
+name: Internet Relay
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'URL to fetch'
+        required: true
+        type: string
+      method:
+        description: 'HTTP method'
+        default: 'GET'
+        type: string
+      post_data:
+        description: 'POST data (if POST method)'
+        default: ''
+        type: string
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch URL
+        id: fetch
+        run: |
+          echo "fetching ${{ github.event.inputs.url }}"
+          if [ "${{ github.event.inputs.method }}" = "POST" ]; then
+            curl -sL --connect-timeout 30 -X POST \
+              -d "${{ github.event.inputs.post_data }}" \
+              "${{ github.event.inputs.url }}" > /tmp/response.txt 2>&1
+          else
+            curl -sL --connect-timeout 30 \
+              "${{ github.event.inputs.url }}" > /tmp/response.txt 2>&1
+          fi
+          echo "status=$?" >> $GITHUB_OUTPUT
+      
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: response
+          path: /tmp/response.txt
